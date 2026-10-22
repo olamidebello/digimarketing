@@ -2,6 +2,7 @@ import unittest,tempfile,threading,json,time,os,http.client
 from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 import app
+from pathlib import Path
 class Tests(unittest.TestCase):
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();app.DB=self.temp.name+'/db';app.init();app.ATTEMPTS.clear();os.environ['DIGI_DEV']='1'
@@ -41,7 +42,10 @@ class Tests(unittest.TestCase):
   with app.db() as c:self.assertEqual(c.execute('SELECT count(*) FROM campaigns').fetchone()[0],0)
  def test_assets_and_no_fake_apk(self):
   for path in ['/','/app.js','/style.css','/brand.png','/terms','/privacy','/copyright','/manifest.json']:self.assertEqual(self.req(path)[0],200,path)
-  self.assertFalse(self.req('/api/download')[1]['available']);self.assertEqual(self.req('/downloads/DigiMarketing.apk')[0],404)
+  with patch('app.ROOT',Path(self.temp.name)):
+   self.assertFalse(self.req('/api/download')[1]['available']);self.assertEqual(self.req('/downloads/DigiMarketing.apk')[0],404)
+   downloads=Path(self.temp.name)/'downloads';downloads.mkdir();(downloads/'DigiMarketing.apk').write_bytes(b'test-apk')
+   self.assertTrue(self.req('/api/download')[1]['available']);self.assertEqual(self.req('/downloads/DigiMarketing.apk')[1],b'test-apk')
  def test_ai_mock_and_no_secret_exposure(self):
   self.register()
   with patch.dict(os.environ,{'OPENAI_API_KEY':'test-secret','OPENAI_MODEL':'test-model'}),patch('app.remote',return_value={'output':[{'content':[{'type':'output_text','text':'Real copy'}]}]}):
