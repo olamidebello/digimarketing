@@ -1,0 +1,45 @@
+---
+- name: Verify local built APK exists
+  ansible.builtin.stat:
+    path: '{{ digi_apk_source }}'
+  register: apk
+- name: Require actual APK input
+  ansible.builtin.assert:
+    that:
+      - apk.stat.isreg | default(false)
+      - digi_apk_source is match('^/.*\.apk$')
+- name: Create website download directory
+  ansible.builtin.file:
+    path: '{{ digi_root }}/repo/downloads'
+    state: directory
+    mode: '0755'
+- name: Install APK on DigiMarketing
+  ansible.builtin.copy:
+    src: '{{ digi_apk_source }}'
+    dest: '{{ digi_root }}/repo/downloads/DigiMarketing.apk'
+    remote_src: true
+    mode: '0644'
+- name: Prepare independent store package
+  ansible.builtin.file:
+    path: /var/lib/digimarketing/store-package
+    state: directory
+    mode: '0755'
+- name: Write store submission metadata
+  ansible.builtin.copy:
+    dest: /var/lib/digimarketing/store-package/digimarketing.json
+    mode: '0644'
+    content: |
+      {
+        "id": "com.olamidepanel.digimarketing.dev",
+        "name": "DigiMarketing",
+        "version": "1.0.0-dev",
+        "channel": "development",
+        "description": "AI-assisted campaign planning, drafting, approval and scheduling. Direct publishing for configured Mastodon accounts; copy export for other channels.",
+        "website": "https://digimarketing.olamidepanel.com/",
+        "download_url": "https://digimarketing.olamidepanel.com/downloads/DigiMarketing.apk",
+        "icon_url": "https://digimarketing.olamidepanel.com/brand.png",
+        "privacy_url": "https://digimarketing.olamidepanel.com/privacy"
+      }
+- name: Report store submission state
+  ansible.builtin.debug:
+    msg: "APK installed and store metadata prepared. African Apps Store catalog import requires its actual catalog schema or API; no existing catalog has been overwritten."

@@ -1,0 +1,11 @@
+.env*
+!.env.example
+data/
+__pycache__/
+*.pyc
+android/.gradle/
+android/local.properties
+android/**/build/
+*.jks
+*.keystore
+downloads/*.apk

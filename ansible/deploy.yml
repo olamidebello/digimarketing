@@ -1,0 +1,177 @@
+---
+- name: Deploy DigiMarketing to Olamidepanel
+  hosts: all
+  become: true
+  vars:
+    digi_domain: digimarketing.olamidepanel.com
+    digi_root: /opt/digimarketing
+    digi_port: 18840
+    digi_repo: https://github.com/olamidebello/digimarketing.git
+    digi_ref: main
+    digi_ai_env: ''
+    digi_tls_email: dobcalldemo@gmail.com
+    digi_apk_source: ''
+  tasks:
+    - name: Validate deployment settings
+      ansible.builtin.assert:
+        that:
+          - digi_domain is match('^[a-zA-Z0-9.-]+$')
+          - digi_port | int > 1024
+          - digi_port | int < 65536
+          - digi_ai_env == '' or digi_ai_env is match('^/[a-zA-Z0-9/_.-]+$')
+    - name: Install runtime and gateway
+      ansible.builtin.apt:
+        name: [python3, git, nginx, certbot, python3-certbot-nginx]
+        state: present
+        update_cache: true
+    - name: Create dedicated service account
+      ansible.builtin.user:
+        name: digimarketing
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+    - name: Prepare deployment directory
+      ansible.builtin.file:
+        path: '{{ digi_root }}'
+        state: directory
+        mode: '0755'
+    - name: Pull source without discarding local changes
+      ansible.builtin.git:
+        repo: '{{ digi_repo }}'
+        dest: '{{ digi_root }}/repo'
+        version: '{{ digi_ref }}'
+        force: false
+    - name: Validate application syntax
+      ansible.builtin.command: python3 -m py_compile {{ digi_root }}/repo/app.py
+      changed_when: false
+    - name: Test application before installing
+      ansible.builtin.command: python3 -m unittest discover -s tests -v
+      args:
+        chdir: '{{ digi_root }}/repo'
+      changed_when: false
+    - name: Create protected state directory
+      ansible.builtin.file:
+        path: /var/lib/digimarketing
+        state: directory
+        owner: digimarketing
+        group: digimarketing
+        mode: '0700'
+    - name: Create protected configuration directory
+      ansible.builtin.file:
+        path: /etc/digimarketing
+        state: directory
+        owner: root
+        group: digimarketing
+        mode: '0750'
+    - name: Preserve account configuration on upgrades
+      ansible.builtin.copy:
+        dest: /etc/digimarketing/accounts.json
+        content: '{}'
+        force: false
+        owner: root
+        group: digimarketing
+        mode: '0640'
+    - name: Check selected existing server AI environment
+      ansible.builtin.stat:
+        path: '{{ digi_ai_env }}'
+      register: ai_file
+      when: digi_ai_env != ''
+    - name: Require selected existing environment file
+      ansible.builtin.assert:
+        that: ai_file.stat.isreg | default(false)
+        fail_msg: The selected existing server environment file does not exist.
+      when: digi_ai_env != ''
+    - name: Install service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/digimarketing.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=DigiMarketing campaign workspace
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          User=digimarketing
+          Group=digimarketing
+          WorkingDirectory={{ digi_root }}/repo
+          {% if digi_ai_env != '' %}
+          EnvironmentFile={{ digi_ai_env }}
+          {% endif %}
+          Environment=DIGI_DB=/var/lib/digimarketing/app.db
+          Environment=PORT={{ digi_port }}
+          Environment=DIGI_ACCOUNTS_FILE=/etc/digimarketing/accounts.json
+          ExecStart=/usr/bin/python3 {{ digi_root }}/repo/app.py
+          Restart=on-failure
+          RestartSec=5
+          UMask=0077
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          ReadWritePaths=/var/lib/digimarketing
+          [Install]
+          WantedBy=multi-user.target
+    - name: Back up existing database online
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - "import sqlite3,pathlib,datetime; p=pathlib.Path('/var/lib/digimarketing/app.db'); p.exists() and sqlite3.connect(str(p)).backup(sqlite3.connect(str(p)+'.'+datetime.datetime.now().strftime('%Y%m%d%H%M%S')+'.bak'))"
+      changed_when: false
+    - name: Start application
+      ansible.builtin.systemd:
+        name: digimarketing
+        enabled: true
+        state: restarted
+        daemon_reload: true
+    - name: Verify application readiness
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ digi_port }}/health
+      register: ready
+      retries: 10
+      delay: 2
+      until: ready.status == 200
+    - name: Install dedicated domain gateway
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/{{ digi_domain }}
+        force: false
+        mode: '0644'
+        content: |
+          server {
+            listen 80;
+            server_name {{ digi_domain }};
+            client_max_body_size 64k;
+            location / {
+              proxy_pass http://127.0.0.1:{{ digi_port }};
+              proxy_set_header Host $host;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_read_timeout 60s;
+            }
+          }
+    - name: Enable domain
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/{{ digi_domain }}
+        dest: /etc/nginx/sites-enabled/{{ digi_domain }}
+        state: link
+    - name: Validate all gateway configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+    - name: Reload gateway
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
+    - name: Obtain domain HTTPS certificate
+      ansible.builtin.command:
+        argv: [certbot, --nginx, -d, '{{ digi_domain }}', --non-interactive, --agree-tos, --redirect, -m, '{{ digi_tls_email }}', --keep-until-expiring]
+      register: certificate
+      changed_when: "'no action taken' not in certificate.stdout"
+    - name: Publish supplied built APK
+      ansible.builtin.include_tasks: publish-app.yml
+      when: digi_apk_source != ''
+    - name: Verify public HTTPS endpoint
+      ansible.builtin.uri:
+        url: https://{{ digi_domain }}/health
+        validate_certs: true
+    - name: Report deployment
+      ansible.builtin.debug:
+        msg: "DigiMarketing HTTPS verified. AI environment selected={{ digi_ai_env != '' }}. Configure OPENAI_MODEL in the existing environment if absent. APK installed={{ digi_apk_source != '' }}. Other social integrations remain manual export."
