@@ -9,6 +9,7 @@ from http.cookies import SimpleCookie
 import integrations
 import facebook
 import commerce
+import controls
 
 ROOT = Path(__file__).parent
 DB = os.getenv('DIGI_DB', str(ROOT / 'data/app.db'))
@@ -41,6 +42,7 @@ def init():
         ''')
         c.execute('INSERT OR IGNORE INTO user_sequence(id) SELECT id FROM users')
         commerce.init(c)
+        controls.init(c)
     os.chmod(DB,0o600)
 
 def next_user_id(c):
@@ -82,6 +84,8 @@ def accounts(uid):
     with db() as c:
         configured=integrations.social(c,DB,uid)
         fb=facebook.account(c,DB,uid)
+        share=c.execute('SELECT owner_id FROM page_shares WHERE user_id=?',(uid,)).fetchone()
+        if not fb and share:fb=facebook.account(c,DB,share['owner_id'])
     if configured is None:
         path=Path(os.getenv('DIGI_ACCOUNTS_FILE','/etc/digimarketing/accounts.json'))
         configured=json.loads(path.read_text()).get(str(uid),{}) if path.exists() else {}
@@ -99,6 +103,13 @@ def publish(uid, channel, content, campaign_id):
     if len(content)>500: raise ValueError('Mastodon post exceeds 500 characters; edit before scheduling.')
     result=remote(host+'/api/v1/statuses',{'status':content,'visibility':'public'},config['access_token'],{'Idempotency-Key':f'digi-{campaign_id}-Mastodon'})
     return str(result['id'])
+
+def uid_for_channel(c,uid,channel):
+    if channel!='Facebook':return uid
+    meta,token=integrations.record(c,'facebook:'+str(uid))
+    if meta and token and meta.get('enabled') and meta.get('verified'):return uid
+    share=c.execute('SELECT owner_id FROM page_shares WHERE user_id=?',(uid,)).fetchone()
+    return share['owner_id'] if share else uid
 
 DEFAULT_LIMITS={'batch_size':10,'hourly':12,'daily':100,'interval':60}
 
@@ -132,7 +143,8 @@ def _tick():
             for channel in json.loads(candidate['channels']):
                 sent=c.execute("SELECT status FROM deliveries WHERE campaign_id=? AND channel=?",(candidate['id'],channel)).fetchone()
                 if sent and sent['status']=='published': continue
-                stamps=[r[0] for r in c.execute('SELECT created FROM attempts WHERE user_id=? AND channel=? AND created>? ORDER BY created',(candidate['user_id'],channel,now-86400))]
+                limit_uid=uid_for_channel(c,candidate['user_id'],channel)
+                stamps=[r[0] for r in c.execute('SELECT created FROM attempts WHERE user_id=? AND channel=? AND created>? ORDER BY created',(limit_uid,channel,now-86400))]
                 hourly=[t for t in stamps if t>now-3600]
                 if len(stamps)>=limits['daily']: blocked_until=max(blocked_until,stamps[-limits['daily']]+86400)
                 if len(hourly)>=limits['hourly']: blocked_until=max(blocked_until,hourly[-limits['hourly']]+3600)
@@ -146,7 +158,7 @@ def _tick():
         c.execute('INSERT OR REPLACE INTO claims VALUES(?,?)',(row['id'],now))
         for channel in json.loads(row['channels']):
             old=c.execute('SELECT status FROM deliveries WHERE campaign_id=? AND channel=?',(row['id'],channel)).fetchone()
-            if not old or old['status']!='published':c.execute('INSERT INTO attempts VALUES(?,?,?,?)',(row['id'],row['user_id'],channel,now))
+            if not old or old['status']!='published':c.execute('INSERT INTO attempts VALUES(?,?,?,?)',(row['id'],uid_for_channel(c,row['user_id'],channel),channel,now))
     retry_due=None
     for channel in json.loads(row['channels']):
         with db() as c:
@@ -219,7 +231,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=='/api/admin/integrations':
             if u['role']!='admin': return self.reply(403,{'error':'Administrator required'})
             with db() as c:
-                response={'ai':integrations.public_ai(c,DB),'facebook':facebook.public(c),'social':integrations.public_social(c),'users':[dict(r) for r in c.execute('SELECT id,email FROM users ORDER BY id LIMIT 500')],'audit':[dict(r) for r in c.execute('SELECT * FROM integration_audit ORDER BY id DESC LIMIT 50')]}
+                response={'ai':integrations.public_ai(c,DB),'balances':[{'user_id':r['id'],'email':r['email'],'balance':controls.balance(c,r['id'])} for r in c.execute('SELECT id,email FROM users')],'credits':[dict(r) for r in c.execute('SELECT * FROM credit_ledger ORDER BY id DESC LIMIT 100')],'page_shares':[dict(r) for r in c.execute('SELECT * FROM page_shares')],'facebook':facebook.public(c),'social':integrations.public_social(c),'users':[dict(r) for r in c.execute('SELECT id,email FROM users ORDER BY id LIMIT 500')],'audit':[dict(r) for r in c.execute('SELECT * FROM integration_audit ORDER BY id DESC LIMIT 50')]}
             return self.reply(200,response)
         if self.path=='/api/state':
             with db() as c:
@@ -227,9 +239,10 @@ class Handler(BaseHTTPRequestHandler):
                 deliveries=[dict(r) for r in c.execute('SELECT deliveries.* FROM deliveries JOIN campaigns ON campaigns.id=campaign_id WHERE user_id=?',(u['id'],))]
                 paused=c.execute("SELECT value FROM settings WHERE key='paused'").fetchone()
                 runs=[dict(r) for r in c.execute('SELECT * FROM batch_runs ORDER BY id DESC LIMIT 20')] if u['role']=='admin' else []
+                balance=controls.balance(c,u['id'])
                 ai_ready=integrations.public_ai(c,DB)['ready']
                 stats=dict(c.execute('SELECT (SELECT count(*) FROM users) users,(SELECT count(*) FROM campaigns) campaigns').fetchone()) if u['role']=='admin' else None
-            return self.reply(200,{'user':{'id':u['id'],'email':u['email'],'role':u['role']},'csrf':u['csrf'],'campaigns':campaigns,'deliveries':deliveries,'channels':CHANNELS,'connected':list(accounts(u['id'])),'ai_ready':ai_ready,'admin':stats,'paused':bool(paused and paused['value']=='1'),'automation':automation_limits(),'batch_runs':runs})
+            return self.reply(200,{'user':{'id':u['id'],'email':u['email'],'role':u['role']},'csrf':u['csrf'],'campaigns':campaigns,'deliveries':deliveries,'channels':CHANNELS,'connected':list(accounts(u['id'])),'balance':balance,'ai_ready':ai_ready,'admin':stats,'paused':bool(paused and paused['value']=='1'),'automation':automation_limits(),'batch_runs':runs})
         self.reply(404,{'error':'Not found'})
     def do_POST(self):
         try: self.post()
@@ -273,7 +286,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=='/api/checkout':
             if d.get('accepted_purchase_terms') is not True: return self.reply(400,{'error':'Review the product and purchase terms before checkout.'})
             try:
-                with db() as c:result=commerce.start_checkout(c,DB,u['id'],u['email'],d['product_id'],d['provider'],d.get('brief',''))
+                with db() as c:
+                    if d['provider']=='credit':
+                        c.execute('BEGIN IMMEDIATE');result=controls.purchase(c,u['id'],d['product_id'],d.get('brief',''),d.get('request_id',''))
+                    else:result=commerce.start_checkout(c,DB,u['id'],u['email'],d['product_id'],d['provider'],d.get('brief',''))
                 return self.reply(201,result)
             except ValueError as e:return self.reply(400,{'error':str(e)})
         if self.path=='/api/orders/verify':
@@ -295,12 +311,13 @@ class Handler(BaseHTTPRequestHandler):
                 if active: return self.reply(409,{'error':'Wait for publishing to finish before deleting your account'})
                 c.execute('DELETE FROM deliveries WHERE campaign_id IN (SELECT id FROM campaigns WHERE user_id=?)',(u['id'],))
                 c.execute('DELETE FROM claims WHERE campaign_id IN (SELECT id FROM campaigns WHERE user_id=?)',(u['id'],))
+                c.execute('DELETE FROM page_shares WHERE user_id=? OR owner_id=?',(u['id'],u['id']))
                 c.execute('DELETE FROM integrations WHERE name IN (?,?)',('mastodon:'+str(u['id']),'facebook:'+str(u['id'])))
                 c.execute("UPDATE orders SET user_id=NULL,brief='' WHERE user_id=?",(u['id'],))
                 for table in ['attempts','ai_usage','legal_acceptances']:c.execute('DELETE FROM '+table+' WHERE user_id=?',(u['id'],))
                 c.execute('DELETE FROM campaigns WHERE user_id=?',(u['id'],)); c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],)); c.execute('DELETE FROM users WHERE id=?',(u['id'],))
             return self.reply(200,{'ok':True},'session=; Max-Age=0; Path=/')
-        if self.path in ['/api/admin/integrations/facebook','/api/admin/integrations/facebook/verify','/api/admin/integrations/ai','/api/admin/integrations/social','/api/admin/integrations/test','/api/admin/marketplace/gateway','/api/admin/marketplace/product','/api/admin/marketplace/fulfillment']:
+        if self.path in ['/api/admin/credits','/api/admin/page-shares','/api/admin/integrations/facebook','/api/admin/integrations/facebook/verify','/api/admin/integrations/ai','/api/admin/integrations/social','/api/admin/integrations/test','/api/admin/marketplace/gateway','/api/admin/marketplace/product','/api/admin/marketplace/fulfillment']:
             if u['role']!='admin':return self.reply(403,{'error':'Administrator required'})
             with db() as c:
                 failures=c.execute("SELECT count(*) FROM integration_audit WHERE actor=? AND action='reauth.failed' AND created>?",(u['id'],time.time()-300)).fetchone()[0]
@@ -312,7 +329,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with db() as c:
                     c.execute('BEGIN IMMEDIATE')
-                    if self.path.endswith('/facebook'):facebook.save(c,DB,d,u['id'])
+                    if self.path=='/api/admin/credits':controls.credit(c,d,u['id'])
+                    elif self.path=='/api/admin/page-shares':controls.share(c,d,u['id'])
+                    elif self.path.endswith('/facebook'):facebook.save(c,DB,d,u['id'])
                     elif self.path.endswith('/facebook/verify'):facebook.verify(c,DB,d['user_id'],u['id'])
                     elif self.path.endswith('/gateway'):commerce.save_gateway(c,DB,d,u['id'])
                     elif self.path.endswith('/product'):commerce.save_product(c,d,u['id'])
