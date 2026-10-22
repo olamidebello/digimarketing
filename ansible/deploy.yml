@@ -27,6 +27,16 @@
           - digi_port | int > 1024
           - digi_port | int < 65536
           - digi_ai_env == '' or digi_ai_env is match('^/[a-zA-Z0-9/_.-]+$')
+    - name: Check selected existing server AI environment
+      ansible.builtin.stat:
+        path: '{{ digi_ai_env }}'
+      register: ai_file
+      when: digi_ai_env != ''
+    - name: Require selected existing environment file
+      ansible.builtin.assert:
+        that: ai_file.stat.isreg | default(false)
+        fail_msg: The selected AI environment file does not exist. Set digi_ai_env to a real existing file, or use -e '{"digi_ai_env":""}' to deploy with AI drafting disabled.
+      when: digi_ai_env != ''
     - name: Install runtime and gateway
       ansible.builtin.apt:
         name: [python3, git, nginx, certbot, python3-certbot-nginx, ansible-core]
@@ -101,16 +111,6 @@
         owner: root
         group: digimarketing
         mode: '0640'
-    - name: Check selected existing server AI environment
-      ansible.builtin.stat:
-        path: '{{ digi_ai_env }}'
-      register: ai_file
-      when: digi_ai_env != ''
-    - name: Require selected existing environment file
-      ansible.builtin.assert:
-        that: ai_file.stat.isreg | default(false)
-        fail_msg: The selected existing server environment file does not exist.
-      when: digi_ai_env != ''
     - name: Install service
       ansible.builtin.copy:
         dest: /etc/systemd/system/digimarketing.service

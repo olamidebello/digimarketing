@@ -132,3 +132,16 @@ If the DigiMarketing address displays another application, rerun the pull-and-de
 Readiness now requires the explicit `service: digimarketing` marker and a PID matching the DigiMarketing systemd service. The domain configuration is backed up and regenerated using the selected port, preserving its existing domain certificate. Public verification checks both the app identity and homepage branding; a generic HTTP 200 no longer passes.
 
 The route check stops rather than overwriting a site file shared with another hostname, or ignoring another active declaration of the DigiMarketing hostname. Such errors identify the configuration filenames requiring review. The repair cannot verify DNS or inspect server state until run on the server.
+
+
+### Recover from an invalid saved AI environment path
+
+The AI file preflight now runs before stopping the service or saving deployment choices. If a previous deployment saved a nonexistent placeholder path, override it explicitly during the next pull:
+
+```sh
+ansible-pull -U https://github.com/olamidebello/digimarketing.git \
+ -C main -d /opt/digimarketing-bootstrap -i localhost, -c local \
+ ansible/pull-and-deploy.yml -e '{"digi_ai_env":""}'
+```
+
+This restores deployment with AI drafting disabled and saves the empty selection. It does not delete any existing AI key or server environment file. Re-enable drafting later using the verified existing file path. Never create an empty placeholder environment file just to pass the existence check.
