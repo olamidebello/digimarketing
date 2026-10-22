@@ -8,7 +8,7 @@ Initial working platform: isolated user workspaces, AI-assisted campaign drafts,
 
 Mastodon text publishing is implemented for operator-verified accounts. Facebook, Instagram, X, LinkedIn, TikTok, YouTube, Pinterest and Threads support planning and text export only. OAuth onboarding, publishing adapters for those platforms, media uploads, analytics, billing, paid ads and automated account signup are not implemented. No account farming, verification bypass or promise of reaching everyone.
 
-Backend: Python 3.11 standard library, SQLite, PBKDF2 passwords, one-day sessions, CSRF protection, login throttling and AI quotas. Use one service process with its embedded worker. Restart marks interrupted publishing jobs for review. Provider idempotency keys and atomic job claims reduce duplicates; uncertain delivery is never blindly retried.
+Backend: Python 3.11 standard library, SQLite, PBKDF2 passwords, one-day sessions, CSRF protection, login throttling and AI quotas. Development uses one service process with an embedded worker; production deployment uses the separate Ansible batch timer described below. Restart marks interrupted publishing jobs for review. Provider idempotency keys and atomic job claims reduce duplicates; uncertain delivery is never blindly retried.
 
 ## Local development
 
@@ -75,3 +75,32 @@ Live AI and publishing require credentials; tests mock provider calls. Server SS
 ## Artwork
 
 `static/brand.png` is the master; the Android drawable is its resized derivative. Built-in image generation prompt: an original dimensional digital D combining a broadcasting megaphone and growth arrow, with violet/cyan/coral gradients on midnight navy. The website adds a DigiMarketing wordmark. No third-party platform endorsement is implied.
+
+## Ansible campaign automation and batches
+
+Deployment now disables the web process's embedded publisher and installs `digimarketing-batch.timer`. Every minute it starts a restricted service running `ansible/run-campaign-batch.yml` as the DigiMarketing service user. Ansible invokes `automation.py`; campaign text stays in SQLite and is never treated as shell commands or playbook instructions. AI drafting stays in the campaign studio: these jobs publish already reviewed content, they do not generate new copy and send it without approval.
+
+Select up to 100 campaigns in the campaign library and approve a start time. The API atomically checks ownership and connected channels before scheduling the whole selection, spaced by 60 seconds. Unsupported channels block the selection without partially scheduling it.
+
+Defaults: **10 campaigns per run, 12 attempts per account/channel per hour, 100 per day, at least 60 seconds between posts**. Administrators can adjust these in the dashboard and pause all delivery. Provider limits remain authoritative; local limits do not override platform rules. Counts include failed attempts. The admin dashboard shows the latest 20 batch runs; full history stays in `batch_runs`, delivery attempts in `attempts` and receipts in `deliveries`.
+
+A shared OS lock prevents overlapping workers from sending concurrently, while SQLite records claims and attempts. HTTP 429 responses honor `Retry-After` and receive at most three total attempts. Other failures, network uncertainty and interrupted deliveries require review rather than blind retries. Changing copy still requires manual approval before rescheduling. The batch runner has a 120-second work budget checked between campaigns, plus a five-minute service timeout. A run processes fewer jobs when an account is cooling down or a provider is unavailable.
+
+Preview a batch without publishing (run on the server as the service user):
+
+```sh
+sudo -u digimarketing env HOME=/var/lib/digimarketing \
+ ansible-playbook -i localhost, -c local \
+ /opt/digimarketing/repo/ansible/run-campaign-batch.yml -e digi_dry_run=true
+```
+
+Run the installed service once: `systemctl start digimarketing-batch.service`. Inspect `journalctl -u digimarketing-batch.service` and `systemctl status digimarketing-batch.timer`. The service runs with protected account-file access. It needs no AI key for posting reviewed campaigns. Disable the timer with `systemctl disable --now digimarketing-batch.timer` if switching back to the embedded worker. Application code takes a lock in either mode.
+
+These are controlled batches to authorized accounts. Automated account creation, mass unsolicited messages, posting to all platform users and bypassing provider verification are not included. Direct publishing remains Mastodon-only until other provider integrations are implemented and authorized.
+
+
+## Terms, privacy and copyright
+
+Public pages `/terms`, `/privacy` and `/copyright` are linked from the website and Android web workspace. Version `2026-10-22.1` covers campaign approval, batch scheduling, provider limits, AI review, advertising responsibilities, rights in content, cookies, provider sharing, acceptance records and automation logs. Registration requires explicit acceptance of the current Terms and acknowledgement of the Privacy Notice. SQLite stores version IDs and acceptance time; no extra IP address is collected for this record. Existing users are not retroactively marked as accepting new terms. Account deletion removes the active acceptance record along with that user's attempt and AI-usage data.
+
+Reference material consulted: [FTC advertising guidance](https://www.ftc.gov/business-guidance/advertising-marketing), [FTC personal-information protection guidance](https://www.ftc.gov/business-guidance/resources/protecting-personal-information-guide-business-0), and [U.S. Copyright Office permission FAQ](https://www.copyright.gov/help/faq/faq-fairuse.html). These pages describe implemented behavior; they do not certify regulatory compliance. Configure and verify the operator's support contact and backup retention before public launch.

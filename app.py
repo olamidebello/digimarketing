@@ -1,5 +1,6 @@
 """DigiMarketing: dependency-free campaign workspace and publishing worker."""
-import os, json, sqlite3, secrets, hashlib, hmac, time, re, threading
+import os, json, sqlite3, secrets, hashlib, hmac, time, re, threading, fcntl
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
@@ -10,6 +11,7 @@ ROOT = Path(__file__).parent
 DB = os.getenv('DIGI_DB', str(ROOT / 'data/app.db'))
 ATTEMPTS = {}
 LIMIT_LOCK = threading.Lock()
+LEGAL_VERSION = '2026-10-22.1'
 CHANNELS = ['Facebook','Instagram','X','LinkedIn','TikTok','YouTube','Pinterest','Threads','Mastodon']
 
 def db():
@@ -20,6 +22,10 @@ def init():
     with db() as c:
         c.executescript('''
         PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS legal_acceptances(user_id INTEGER PRIMARY KEY,terms_version TEXT,privacy_version TEXT,accepted REAL);
+        CREATE TABLE IF NOT EXISTS attempts(campaign_id INTEGER,user_id INTEGER,channel TEXT,created REAL);
+        CREATE TABLE IF NOT EXISTS claims(campaign_id INTEGER PRIMARY KEY,started REAL);
+        CREATE TABLE IF NOT EXISTS batch_runs(id INTEGER PRIMARY KEY,started REAL,finished REAL,processed INTEGER,status TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
         CREATE TABLE IF NOT EXISTS ai_usage(user_id INTEGER,created REAL);
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE,password TEXT,role TEXT);
@@ -27,19 +33,28 @@ def init():
         CREATE TABLE IF NOT EXISTS campaigns(id INTEGER PRIMARY KEY,user_id INTEGER,title TEXT,brief TEXT,content TEXT,channels TEXT,due REAL,status TEXT DEFAULT 'draft',created REAL);
         CREATE TABLE IF NOT EXISTS deliveries(campaign_id INTEGER,channel TEXT,status TEXT,detail TEXT,updated REAL,UNIQUE(campaign_id,channel));
         ''')
-        c.execute("UPDATE campaigns SET status='needs_review' WHERE status='publishing'")
     os.chmod(DB,0o600)
 
 def password(p,salt=None):
     salt=salt or secrets.token_hex(16)
     return salt+':'+hashlib.pbkdf2_hmac('sha256',p.encode(),salt.encode(),300000).hex()
 
+class ProviderError(ValueError):
+    def __init__(self,code,retry_after=60):
+        super().__init__('Provider returned HTTP '+str(code))
+        self.code=code; self.retry_after=retry_after
+
 def remote(url, payload, token, headers=None):
     req=Request(url,json.dumps(payload).encode(),{'Content-Type':'application/json','Authorization':'Bearer '+token,**(headers or {})})
     try:
         with urlopen(req,timeout=45) as r: return json.load(r)
     except HTTPError as e:
-        raise ValueError('Provider returned HTTP '+str(e.code)) from None
+        value=e.headers.get('Retry-After','60')
+        try: delay=max(60,float(value))
+        except ValueError:
+            try: delay=max(60,parsedate_to_datetime(value).timestamp()-time.time())
+            except (ValueError,TypeError): delay=60
+        raise ProviderError(e.code,delay) from None
 
 def generate(brief,channels):
     key=os.getenv('OPENAI_API_KEY')
@@ -66,24 +81,71 @@ def publish(uid, channel, content, campaign_id):
     result=remote(host+'/api/v1/statuses',{'status':content,'visibility':'public'},config['access_token'],{'Idempotency-Key':f'digi-{campaign_id}-Mastodon'})
     return str(result['id'])
 
+DEFAULT_LIMITS={'batch_size':10,'hourly':12,'daily':100,'interval':60}
+
+def automation_limits(c=None):
+    if c is None:
+        with db() as conn: return automation_limits(conn)
+    row=c.execute("SELECT value FROM settings WHERE key='automation_limits'").fetchone()
+    return {**DEFAULT_LIMITS,**(json.loads(row['value']) if row else {})}
+
 def tick():
+    # Shared by web worker and Ansible invocations; prevents overlapping network sends.
+    with open(DB+'.worker.lock','a') as lock:
+        try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError: return False
+        return _tick()
+
+def _tick():
+    now=time.time()
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
+        # A prior worker died without a receipt. Never replay uncertain delivery.
+        c.execute("UPDATE campaigns SET status='needs_review' WHERE status='publishing'")
         paused=c.execute("SELECT value FROM settings WHERE key='paused'").fetchone()
-        if paused and paused['value']=='1': return
-        row=c.execute("SELECT * FROM campaigns WHERE status='scheduled' AND due<=? ORDER BY due LIMIT 1",(time.time(),)).fetchone()
-        if not row: return
+        if paused and paused['value']=='1': return False
+        c.execute('DELETE FROM attempts WHERE created<?',(now-86400,))
+        limits=automation_limits(c)
+        rows=c.execute("SELECT * FROM campaigns WHERE status='scheduled' AND due<=? ORDER BY due,id LIMIT 100",(now,)).fetchall()
+        row=None
+        for candidate in rows:
+            blocked_until=0
+            for channel in json.loads(candidate['channels']):
+                sent=c.execute("SELECT status FROM deliveries WHERE campaign_id=? AND channel=?",(candidate['id'],channel)).fetchone()
+                if sent and sent['status']=='published': continue
+                stamps=[r[0] for r in c.execute('SELECT created FROM attempts WHERE user_id=? AND channel=? AND created>? ORDER BY created',(candidate['user_id'],channel,now-86400))]
+                hourly=[t for t in stamps if t>now-3600]
+                if len(stamps)>=limits['daily']: blocked_until=max(blocked_until,stamps[-limits['daily']]+86400)
+                if len(hourly)>=limits['hourly']: blocked_until=max(blocked_until,hourly[-limits['hourly']]+3600)
+                if stamps: blocked_until=max(blocked_until,stamps[-1]+limits['interval'])
+            if blocked_until>now:
+                c.execute('UPDATE campaigns SET due=? WHERE id=?',(blocked_until+1,candidate['id']))
+                continue
+            row=candidate; break
+        if row is None: return False
         c.execute("UPDATE campaigns SET status='publishing' WHERE id=?",(row['id'],))
+        c.execute('INSERT OR REPLACE INTO claims VALUES(?,?)',(row['id'],now))
+        for channel in json.loads(row['channels']):
+            old=c.execute('SELECT status FROM deliveries WHERE campaign_id=? AND channel=?',(row['id'],channel)).fetchone()
+            if not old or old['status']!='published':c.execute('INSERT INTO attempts VALUES(?,?,?,?)',(row['id'],row['user_id'],channel,now))
+    retry_due=None
     for channel in json.loads(row['channels']):
         with db() as c:
             old=c.execute('SELECT status FROM deliveries WHERE campaign_id=? AND channel=?',(row['id'],channel)).fetchone()
         if old and old['status']=='published': continue
         try: detail=publish(row['user_id'],channel,row['content'],row['id']); status='published'
-        except Exception as e: detail=str(e) if isinstance(e,ValueError) else 'Network failure; delivery may be uncertain. Review before rescheduling.'; status='failed'
+        except Exception as e:
+            detail=str(e) if isinstance(e,ValueError) else 'Network failure; delivery may be uncertain. Review before rescheduling.'; status='failed'
+            with db() as c: count=c.execute('SELECT count(*) FROM attempts WHERE campaign_id=? AND channel=?',(row['id'],channel)).fetchone()[0]
+            if isinstance(e,ProviderError) and e.code==429 and count<3:
+                status='retry_wait'; retry_due=time.time()+e.retry_after
         with db() as c: c.execute('INSERT OR REPLACE INTO deliveries VALUES(?,?,?,?,?)',(row['id'],channel,status,detail,time.time()))
     with db() as c:
-        failed=c.execute("SELECT 1 FROM deliveries WHERE campaign_id=? AND status!='published'",(row['id'],)).fetchone()
-        c.execute('UPDATE campaigns SET status=? WHERE id=?',('needs_review' if failed else 'published',row['id']))
+        failed=c.execute("SELECT 1 FROM deliveries WHERE campaign_id=? AND status='failed'",(row['id'],)).fetchone()
+        status='needs_review' if failed else ('scheduled' if retry_due else 'published')
+        c.execute('UPDATE campaigns SET status=?,due=COALESCE(?,due) WHERE id=?',(status,retry_due,row['id']))
+        c.execute('DELETE FROM claims WHERE campaign_id=?',(row['id'],))
+    return True
 
 def worker():
     while True:
@@ -106,6 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         if not token: return None
         with db() as c: return c.execute('SELECT users.*,sessions.csrf FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?',(hashlib.sha256(token.value.encode()).hexdigest(),time.time())).fetchone()
     def do_GET(self):
+        if self.path=='/api/legal': return self.reply(200,{'version':LEGAL_VERSION,'terms':'/terms','privacy':'/privacy','copyright':'/copyright'})
         if self.path=='/health': return self.reply(200,{'ok':True})
         if self.path=='/api/download': return self.reply(200,{'available':(ROOT/'downloads/DigiMarketing.apk').is_file()})
         if self.path=='/downloads/DigiMarketing.apk':
@@ -128,8 +191,9 @@ class Handler(BaseHTTPRequestHandler):
                 campaigns=[dict(r) for r in c.execute('SELECT * FROM campaigns WHERE user_id=? ORDER BY id DESC',(u['id'],))]
                 deliveries=[dict(r) for r in c.execute('SELECT deliveries.* FROM deliveries JOIN campaigns ON campaigns.id=campaign_id WHERE user_id=?',(u['id'],))]
                 paused=c.execute("SELECT value FROM settings WHERE key='paused'").fetchone()
+                runs=[dict(r) for r in c.execute('SELECT * FROM batch_runs ORDER BY id DESC LIMIT 20')] if u['role']=='admin' else []
                 stats=dict(c.execute('SELECT (SELECT count(*) FROM users) users,(SELECT count(*) FROM campaigns) campaigns').fetchone()) if u['role']=='admin' else None
-            return self.reply(200,{'user':{'id':u['id'],'email':u['email'],'role':u['role']},'csrf':u['csrf'],'campaigns':campaigns,'deliveries':deliveries,'channels':CHANNELS,'connected':list(accounts(u['id'])),'ai_ready':bool(os.getenv('OPENAI_API_KEY') and os.getenv('OPENAI_MODEL')),'admin':stats,'paused':bool(paused and paused['value']=='1')})
+            return self.reply(200,{'user':{'id':u['id'],'email':u['email'],'role':u['role']},'csrf':u['csrf'],'campaigns':campaigns,'deliveries':deliveries,'channels':CHANNELS,'connected':list(accounts(u['id'])),'ai_ready':bool(os.getenv('OPENAI_API_KEY') and os.getenv('OPENAI_MODEL')),'admin':stats,'paused':bool(paused and paused['value']=='1'),'automation':automation_limits(),'batch_runs':runs})
         self.reply(404,{'error':'Not found'})
     def do_POST(self):
         try: self.post()
@@ -150,10 +214,12 @@ class Handler(BaseHTTPRequestHandler):
             if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email) or len(email)>254 or len(p)<12 or len(p)>256: raise ValueError()
             with db() as c:
                 if self.path.endswith('register'):
+                    if d.get('accepted_terms') is not True or d.get('privacy_acknowledged') is not True or d.get('legal_version')!=LEGAL_VERSION:return self.reply(400,{'error':'Accept the current Terms and acknowledge the Privacy Notice to create an account. Reload this page if it is out of date.'})
                     try: c.execute('INSERT INTO users(email,password,role) VALUES(?,?,?)',(email,password(p),'user'))
                     except sqlite3.IntegrityError: return self.reply(409,{'error':'Account already exists'})
                 user=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone()
                 if not user or not hmac.compare_digest(password(p,user['password'].split(':')[0]),user['password']): return self.reply(401,{'error':'Invalid credentials'})
+                if self.path.endswith('register'):c.execute('INSERT INTO legal_acceptances VALUES(?,?,?,?)',(user['id'],LEGAL_VERSION,LEGAL_VERSION,time.time()))
                 token=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(32)
                 c.execute('DELETE FROM sessions WHERE expires<?',(time.time(),))
                 c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),user['id'],csrf,time.time()+86400))
@@ -165,11 +231,31 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200,{'ok':True},'session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict')
         if self.path=='/api/account/delete':
             with db() as c:
+                c.execute('BEGIN IMMEDIATE')
                 active=c.execute("SELECT 1 FROM campaigns WHERE user_id=? AND status='publishing'",(u['id'],)).fetchone()
                 if active: return self.reply(409,{'error':'Wait for publishing to finish before deleting your account'})
                 c.execute('DELETE FROM deliveries WHERE campaign_id IN (SELECT id FROM campaigns WHERE user_id=?)',(u['id'],))
+                c.execute('DELETE FROM claims WHERE campaign_id IN (SELECT id FROM campaigns WHERE user_id=?)',(u['id'],))
+                for table in ['attempts','ai_usage','legal_acceptances']:c.execute('DELETE FROM '+table+' WHERE user_id=?',(u['id'],))
                 c.execute('DELETE FROM campaigns WHERE user_id=?',(u['id'],)); c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],)); c.execute('DELETE FROM users WHERE id=?',(u['id'],))
             return self.reply(200,{'ok':True},'session=; Max-Age=0; Path=/')
+        if self.path=='/api/admin/automation':
+            if u['role']!='admin': return self.reply(403,{'error':'Administrator required'})
+            limits={k:int(d[k]) for k in DEFAULT_LIMITS}
+            if not (1<=limits['batch_size']<=100 and 1<=limits['hourly']<=120 and 1<=limits['daily']<=1000 and 30<=limits['interval']<=86400):raise ValueError()
+            with db() as c:c.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('automation_limits',json.dumps(limits)))
+            return self.reply(200,{'ok':True})
+        if self.path=='/api/campaigns/batch':
+            ids=list(dict.fromkeys(int(x) for x in d['ids']));due=float(d['due']);spacing=int(d.get('spacing',60))
+            if not ids or len(ids)>100 or d.get('approved') is not True or not 30<=spacing<=86400 or due<time.time()-60 or due+spacing*len(ids)>time.time()+366*86400:raise ValueError()
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                for cid in ids:
+                    row=c.execute('SELECT * FROM campaigns WHERE id=? AND user_id=?',(cid,u['id'])).fetchone()
+                    if not row or row['status'] not in ['draft','scheduled']:return self.reply(409,{'error':'Choose only your own drafts or scheduled campaigns.'})
+                    if any(ch!='Mastodon' or ch not in accounts(u['id']) for ch in json.loads(row['channels'])):return self.reply(409,{'error':'Every selected campaign needs a connected publishing channel.'})
+                for index,cid in enumerate(ids):c.execute("UPDATE campaigns SET status='scheduled',due=? WHERE id=?",(due+index*spacing,cid))
+            return self.reply(200,{'scheduled':len(ids)})
         if self.path=='/api/admin/pause':
             if u['role']!='admin': return self.reply(403,{'error':'Administrator required'})
             with db() as c: c.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('paused','1' if d.get('paused') else '0'))
@@ -209,6 +295,8 @@ class Handler(BaseHTTPRequestHandler):
                     c.execute("UPDATE campaigns SET status='scheduled',due=? WHERE id=?",(due,cid))
                 elif action=='cancel': c.execute("UPDATE campaigns SET status='draft',due=NULL WHERE id=?",(cid,))
                 else:
+                    c.execute('UPDATE attempts SET campaign_id=NULL WHERE campaign_id=?',(cid,))
+                    c.execute('DELETE FROM claims WHERE campaign_id=?',(cid,))
                     c.execute('DELETE FROM deliveries WHERE campaign_id=?',(cid,)); c.execute('DELETE FROM campaigns WHERE id=?',(cid,))
             return self.reply(200,{'ok':True})
         self.reply(404,{'error':'Not found'})

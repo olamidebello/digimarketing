@@ -16,7 +16,7 @@ class Tests(unittest.TestCase):
   try:return code,json.loads(body)
   except Exception:return code,body
  def register(self,email='a@example.com'):
-  self.assertEqual(self.req('/api/register',{'email':email,'password':'a-secure-test-password'})[0],200);self.csrf=self.req('/api/state')[1]['csrf']
+  self.assertEqual(self.req('/api/register',{'email':email,'password':'a-secure-test-password','accepted_terms':True,'privacy_acknowledged':True,'legal_version':app.LEGAL_VERSION})[0],200);self.csrf=self.req('/api/state')[1]['csrf']
  def campaign(self,channels=None):
   code,d=self.req('/api/campaigns',{'title':'Real offer','content':'Try our product','channels':channels or ['Mastodon']});self.assertEqual(code,201);return d['id']
  def test_isolation_csrf(self):

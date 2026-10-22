@@ -1,0 +1,25 @@
+---
+- name: Process approved DigiMarketing campaign batch
+  hosts: all
+  gather_facts: false
+  vars:
+    digi_root: /opt/digimarketing
+    digi_batch_size: 100
+    digi_dry_run: false
+  tasks:
+    - name: Validate batch size
+      ansible.builtin.assert:
+        that:
+          - digi_batch_size | int >= 1
+          - digi_batch_size | int <= 100
+    - name: Run database-backed campaign batch
+      ansible.builtin.command:
+        argv: "{{ ['python3', digi_root + '/repo/automation.py', '--max-jobs', digi_batch_size | string] + (['--dry-run'] if digi_dry_run | bool else []) }}"
+      environment:
+        DIGI_DB: /var/lib/digimarketing/app.db
+        DIGI_ACCOUNTS_FILE: /etc/digimarketing/accounts.json
+      register: campaign_batch
+      changed_when: not (digi_dry_run | bool) and ((campaign_batch.stdout | from_json).processed | default(0) | int > 0)
+    - name: Report batch counts without campaign content or credentials
+      ansible.builtin.debug:
+        msg: '{{ campaign_batch.stdout | from_json }}'

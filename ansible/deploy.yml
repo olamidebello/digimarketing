@@ -21,7 +21,7 @@
           - digi_ai_env == '' or digi_ai_env is match('^/[a-zA-Z0-9/_.-]+$')
     - name: Install runtime and gateway
       ansible.builtin.apt:
-        name: [python3, git, nginx, certbot, python3-certbot-nginx]
+        name: [python3, git, nginx, certbot, python3-certbot-nginx, ansible-core]
         state: present
         update_cache: true
     - name: Create dedicated service account
@@ -98,6 +98,7 @@
           EnvironmentFile={{ digi_ai_env }}
           {% endif %}
           Environment=DIGI_DB=/var/lib/digimarketing/app.db
+          Environment=DIGI_WORKER=0
           Environment=PORT={{ digi_port }}
           Environment=DIGI_ACCOUNTS_FILE=/etc/digimarketing/accounts.json
           ExecStart=/usr/bin/python3 {{ digi_root }}/repo/app.py
@@ -172,6 +173,49 @@
       ansible.builtin.uri:
         url: https://{{ digi_domain }}/health
         validate_certs: true
+    - name: Install scheduled Ansible batch service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/digimarketing-batch.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=DigiMarketing approved campaign batch via Ansible
+          After=digimarketing.service network-online.target
+          [Service]
+          Type=oneshot
+          User=digimarketing
+          Group=digimarketing
+          WorkingDirectory={{ digi_root }}/repo
+          Environment=HOME=/var/lib/digimarketing
+          Environment=ANSIBLE_LOCAL_TEMP=/var/lib/digimarketing/ansible-tmp
+          Environment=PYTHONDONTWRITEBYTECODE=1
+          ExecStart=/usr/bin/ansible-playbook -i localhost, -c local {{ digi_root }}/repo/ansible/run-campaign-batch.yml -e digi_root={{ digi_root }}
+          TimeoutStartSec=5min
+          UMask=0077
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          ReadWritePaths=/var/lib/digimarketing
+    - name: Install campaign batch timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/digimarketing-batch.timer
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Run DigiMarketing campaign batch each minute
+          [Timer]
+          OnBootSec=60s
+          OnUnitInactiveSec=60s
+          Unit=digimarketing-batch.service
+          [Install]
+          WantedBy=timers.target
+    - name: Enable campaign automation timer
+      ansible.builtin.systemd:
+        name: digimarketing-batch.timer
+        enabled: true
+        state: started
+        daemon_reload: true
     - name: Report deployment
       ansible.builtin.debug:
         msg: "DigiMarketing HTTPS verified. AI environment selected={{ digi_ai_env != '' }}. Configure OPENAI_MODEL in the existing environment if absent. APK installed={{ digi_apk_source != '' }}. Other social integrations remain manual export."
