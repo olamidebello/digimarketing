@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from http.cookies import SimpleCookie
 import integrations
+import facebook
 import commerce
 
 ROOT = Path(__file__).parent
@@ -78,14 +79,19 @@ def generate(brief,channels):
     return text
 
 def accounts(uid):
-    with db() as c: configured=integrations.social(c,DB,uid)
-    if configured is not None:return configured
-    path=os.getenv('DIGI_ACCOUNTS_FILE','/etc/digimarketing/accounts.json')
-    if not Path(path).exists(): return {}
-    return json.loads(Path(path).read_text()).get(str(uid),{})
+    with db() as c:
+        configured=integrations.social(c,DB,uid)
+        fb=facebook.account(c,DB,uid)
+    if configured is None:
+        path=Path(os.getenv('DIGI_ACCOUNTS_FILE','/etc/digimarketing/accounts.json'))
+        configured=json.loads(path.read_text()).get(str(uid),{}) if path.exists() else {}
+    # Facebook is accepted only through the encrypted, verified dashboard connection.
+    configured.pop('Facebook',None)
+    return {**configured,**fb}
 
 def publish(uid, channel, content, campaign_id):
     config=accounts(uid).get(channel)
+    if channel=='Facebook' and config:return facebook.publish(config,content)
     if channel!='Mastodon' or not config: raise ValueError('Direct publishing unavailable: connect an administrator-verified Mastodon account, or export this post.')
     # Hosts are operator-controlled; never accept arbitrary outbound URLs from users.
     host=config['instance'].rstrip('/')
@@ -213,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=='/api/admin/integrations':
             if u['role']!='admin': return self.reply(403,{'error':'Administrator required'})
             with db() as c:
-                response={'ai':integrations.public_ai(c,DB),'social':integrations.public_social(c),'users':[dict(r) for r in c.execute('SELECT id,email FROM users ORDER BY id LIMIT 500')],'audit':[dict(r) for r in c.execute('SELECT * FROM integration_audit ORDER BY id DESC LIMIT 50')]}
+                response={'ai':integrations.public_ai(c,DB),'facebook':facebook.public(c),'social':integrations.public_social(c),'users':[dict(r) for r in c.execute('SELECT id,email FROM users ORDER BY id LIMIT 500')],'audit':[dict(r) for r in c.execute('SELECT * FROM integration_audit ORDER BY id DESC LIMIT 50')]}
             return self.reply(200,response)
         if self.path=='/api/state':
             with db() as c:
@@ -289,12 +295,12 @@ class Handler(BaseHTTPRequestHandler):
                 if active: return self.reply(409,{'error':'Wait for publishing to finish before deleting your account'})
                 c.execute('DELETE FROM deliveries WHERE campaign_id IN (SELECT id FROM campaigns WHERE user_id=?)',(u['id'],))
                 c.execute('DELETE FROM claims WHERE campaign_id IN (SELECT id FROM campaigns WHERE user_id=?)',(u['id'],))
-                c.execute('DELETE FROM integrations WHERE name=?',('mastodon:'+str(u['id']),))
+                c.execute('DELETE FROM integrations WHERE name IN (?,?)',('mastodon:'+str(u['id']),'facebook:'+str(u['id'])))
                 c.execute("UPDATE orders SET user_id=NULL,brief='' WHERE user_id=?",(u['id'],))
                 for table in ['attempts','ai_usage','legal_acceptances']:c.execute('DELETE FROM '+table+' WHERE user_id=?',(u['id'],))
                 c.execute('DELETE FROM campaigns WHERE user_id=?',(u['id'],)); c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],)); c.execute('DELETE FROM users WHERE id=?',(u['id'],))
             return self.reply(200,{'ok':True},'session=; Max-Age=0; Path=/')
-        if self.path in ['/api/admin/integrations/ai','/api/admin/integrations/social','/api/admin/integrations/test','/api/admin/marketplace/gateway','/api/admin/marketplace/product','/api/admin/marketplace/fulfillment']:
+        if self.path in ['/api/admin/integrations/facebook','/api/admin/integrations/facebook/verify','/api/admin/integrations/ai','/api/admin/integrations/social','/api/admin/integrations/test','/api/admin/marketplace/gateway','/api/admin/marketplace/product','/api/admin/marketplace/fulfillment']:
             if u['role']!='admin':return self.reply(403,{'error':'Administrator required'})
             with db() as c:
                 failures=c.execute("SELECT count(*) FROM integration_audit WHERE actor=? AND action='reauth.failed' AND created>?",(u['id'],time.time()-300)).fetchone()[0]
@@ -306,7 +312,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with db() as c:
                     c.execute('BEGIN IMMEDIATE')
-                    if self.path.endswith('/gateway'):commerce.save_gateway(c,DB,d,u['id'])
+                    if self.path.endswith('/facebook'):facebook.save(c,DB,d,u['id'])
+                    elif self.path.endswith('/facebook/verify'):facebook.verify(c,DB,d['user_id'],u['id'])
+                    elif self.path.endswith('/gateway'):commerce.save_gateway(c,DB,d,u['id'])
                     elif self.path.endswith('/product'):commerce.save_product(c,d,u['id'])
                     elif self.path.endswith('/fulfillment'):
                         if d['fulfillment'] not in ['queued','in_progress','fulfilled','refund_review']:raise ValueError('Invalid fulfillment status')
