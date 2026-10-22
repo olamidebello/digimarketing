@@ -66,7 +66,7 @@ ansible-playbook -i localhost, -c local ansible/deploy.yml \
  -e digi_apk_source=/ABSOLUTE/PATH/TO/app-debug.apk
 ```
 
-The site shows its Android download link only after the APK is installed. `/var/lib/digimarketing/store-package/digimarketing.json` contains submission metadata. The existing African Apps Store hosted_apps schema was inspected. Add `-e digi_publish_store=true` with the APK option to back up the existing store database, insert/update only DigiMarketing metadata, and verify the live hosted-app listing. Downloads point to the DigiMarketing website; the store code and other app listings are preserved. Override `digi_store_db` if your store uses a different database path. Match metadata to the supplied APK version and development channel.
+A successfully built development APK is included at `downloads/DigiMarketing.apk` with its SHA-256 sidecar. The deployment installs this build by default, enabling the website download link. To register it in the existing African Apps Store during deployment add `-e digi_publish_store=true`. `/var/lib/digimarketing/store-package/digimarketing.json` contains submission metadata. The existing African Apps Store hosted_apps schema was inspected. Add `-e digi_publish_store=true` with the APK option to back up the existing store database, insert/update only DigiMarketing metadata, and verify the live hosted-app listing. Downloads point to the DigiMarketing website; the store code and other app listings are preserved. Override `digi_store_db` if your store uses a different database path. Match metadata to the supplied APK version and development channel.
 
 ## Operational limits
 

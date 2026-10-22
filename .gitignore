@@ -9,3 +9,4 @@ android/**/build/
 *.jks
 *.keystore
 downloads/*.apk
+!downloads/DigiMarketing.apk

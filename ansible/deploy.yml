@@ -10,7 +10,7 @@
     digi_ref: main
     digi_ai_env: ''
     digi_tls_email: dobcalldemo@gmail.com
-    digi_apk_source: ''
+    digi_apk_source: '{{ digi_root }}/repo/downloads/DigiMarketing.apk'
   tasks:
     - name: Validate deployment settings
       ansible.builtin.assert:
