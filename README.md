@@ -8,11 +8,12 @@ Initial working platform: isolated user workspaces, AI-assisted campaign drafts,
 
 Mastodon text publishing is implemented for operator-verified accounts. Facebook, Instagram, X, LinkedIn, TikTok, YouTube, Pinterest and Threads support planning and text export only. OAuth onboarding, publishing adapters for those platforms, media uploads, analytics, billing, paid ads and automated account signup are not implemented. No account farming, verification bypass or promise of reaching everyone.
 
-Backend: Python 3.11 standard library, SQLite, PBKDF2 passwords, one-day sessions, CSRF protection, login throttling and AI quotas. Development uses one service process with an embedded worker; production deployment uses the separate Ansible batch timer described below. Restart marks interrupted publishing jobs for review. Provider idempotency keys and atomic job claims reduce duplicates; uncertain delivery is never blindly retried.
+Backend: Python 3.11 with cryptography, SQLite, PBKDF2 passwords, one-day sessions, CSRF protection, login throttling and AI quotas. Development uses one service process with an embedded worker; production deployment uses the separate Ansible batch timer described below. Restart marks interrupted publishing jobs for review. Provider idempotency keys and atomic job claims reduce duplicates; uncertain delivery is never blindly retried.
 
 ## Local development
 
 ```sh
+pip install -r requirements.txt
 DIGI_DEV=1 python3 app.py
 python3 -m unittest discover -s tests -v
 node --check static/app.js
@@ -145,3 +146,20 @@ ansible-pull -U https://github.com/olamidebello/digimarketing.git \
 ```
 
 This restores deployment with AI drafting disabled and saves the empty selection. It does not delete any existing AI key or server environment file. Re-enable drafting later using the verified existing file path. Never create an empty placeholder environment file just to pass the existence check.
+
+
+## Super admin API and key management
+
+After deployment, sign in as an administrator and open **API & keys**. This screen supports:
+
+- AI drafting enable/disable, editable OpenAI model ID and drafts-per-user hourly limit.
+- Add or replace a stored OpenAI key, remove it, or switch back to the existing server environment key. Blank key input with Keep preserves the current key. Remove disconnects rather than silently falling back to an environment key.
+- Test the saved OpenAI connection, with an explicit small-usage notice and one-minute test cooldown.
+- Assign, replace, disable or remove an authorized Mastodon token for a specific existing user; optionally return that user to the root-managed account file. Changing the instance requires replacing its token.
+- Redacted provider status, key-source labels, an SHA-256 fingerprint for the AI key and a recent integration audit log. Plaintext keys and tokens are never returned by these APIs.
+
+Every settings change and connection test requires the administrator's current password plus a valid session and CSRF token. Five failed password confirmations trigger a five-minute cooldown. Admin changes, tests and failed confirmations are logged without submitted credentials. Provider secrets entered in the GUI are Fernet-encrypted in SQLite. Production deployment generates `/etc/digimarketing/master.key` once, restricts it to root and the service group, and preserves it on upgrades. Back this key up separately and securely: losing it makes stored provider secrets unreadable. Encryption does not protect against a fully compromised running server.
+
+Existing server environment files and root-managed social account files remain read-only to this GUI. Removing a GUI key does not revoke the credential with its provider or erase old encrypted backups. Revoke compromised keys in the provider console. GUI-managed social tokens are removed on local account deletion; root-managed account-file entries still require operator removal. The integration audit retains numeric actor/target IDs without email or campaign text. API-key creation at a provider, automated OAuth onboarding, other social publishing adapters, and creation of public DigiMarketing API client keys are not included.
+
+No service restart is required for GUI changes. No existing provider key was changed during implementation. Before deployment, the encrypted-store features are not available on the running site.

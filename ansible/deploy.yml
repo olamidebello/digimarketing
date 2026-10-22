@@ -39,7 +39,7 @@
       when: digi_ai_env != ''
     - name: Install runtime and gateway
       ansible.builtin.apt:
-        name: [python3, git, nginx, certbot, python3-certbot-nginx, ansible-core]
+        name: [python3, git, nginx, certbot, python3-certbot-nginx, ansible-core, python3-cryptography]
         state: present
         update_cache: true
     - name: Create dedicated service account
@@ -111,6 +111,20 @@
         owner: root
         group: digimarketing
         mode: '0640'
+    - name: Create integration encryption key without displaying it
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - "import os; from cryptography.fernet import Fernet; p='/etc/digimarketing/master.key'; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o640); os.write(fd,Fernet.generate_key()); os.close(fd)"
+        creates: /etc/digimarketing/master.key
+      no_log: true
+    - name: Restrict encryption key access
+      ansible.builtin.file:
+        path: /etc/digimarketing/master.key
+        owner: root
+        group: digimarketing
+        mode: '0640'
     - name: Install service
       ansible.builtin.copy:
         dest: /etc/systemd/system/digimarketing.service
@@ -127,7 +141,9 @@
           {% if digi_ai_env != '' %}
           EnvironmentFile={{ digi_ai_env }}
           {% endif %}
+          Environment=DIGI_MASTER_KEY_FILE=/etc/digimarketing/master.key
           Environment=DIGI_DB=/var/lib/digimarketing/app.db
+          Environment=DIGI_DEV=0
           Environment=DIGI_WORKER=0
           Environment=PORT={{ digi_listen_port }}
           Environment=DIGI_ACCOUNTS_FILE=/etc/digimarketing/accounts.json
@@ -254,6 +270,7 @@
           User=digimarketing
           Group=digimarketing
           WorkingDirectory={{ digi_root }}/repo
+          Environment=DIGI_MASTER_KEY_FILE=/etc/digimarketing/master.key
           Environment=HOME=/var/lib/digimarketing
           Environment=ANSIBLE_LOCAL_TEMP=/var/lib/digimarketing/ansible-tmp
           Environment=PYTHONDONTWRITEBYTECODE=1
