@@ -124,3 +124,11 @@ On first deployment, append `-e digi_ai_env=/absolute/path/to/the/existing/serve
 After checkout, `bash /opt/digimarketing-bootstrap/scripts/deploy-server.sh` performs the same pull and deployment with a lock against concurrent invocations of that script. Extra Ansible arguments can be appended, such as `-e digi_publish_store=true` to install the app listing in the existing African Apps Store database. Other invocation methods should not be run concurrently. Existing local source edits are preserved: a conflicting checkout stops rather than discarding them.
 
 DNS for `digimarketing.olamidepanel.com` must resolve to this server before certificate issuance. A failed certificate request stops deployment and reports the error; HTTP readiness alone is not a verified HTTPS deployment. Creating the first administrator remains the explicit server-terminal command documented above.
+
+## Repair wrong-site routing
+
+If the DigiMarketing address displays another application, rerun the pull-and-deploy command with the latest source. Deployment stops only `digimarketing.service`, tests its configured port, and selects a free port from 19040–19140 if that port is already occupied. It does not stop the application owning an occupied port. The chosen port is saved for later deployments.
+
+Readiness now requires the explicit `service: digimarketing` marker and a PID matching the DigiMarketing systemd service. The domain configuration is backed up and regenerated using the selected port, preserving its existing domain certificate. Public verification checks both the app identity and homepage branding; a generic HTTP 200 no longer passes.
+
+The route check stops rather than overwriting a site file shared with another hostname, or ignoring another active declaration of the DigiMarketing hostname. Such errors identify the configuration filenames requiring review. The repair cannot verify DNS or inspect server state until run on the server.

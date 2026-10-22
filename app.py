@@ -174,7 +174,7 @@ class Handler(BaseHTTPRequestHandler):
         with db() as c: return c.execute('SELECT users.*,sessions.csrf FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?',(hashlib.sha256(token.value.encode()).hexdigest(),time.time())).fetchone()
     def do_GET(self):
         if self.path=='/api/legal': return self.reply(200,{'version':LEGAL_VERSION,'terms':'/terms','privacy':'/privacy','copyright':'/copyright'})
-        if self.path=='/health': return self.reply(200,{'ok':True})
+        if self.path=='/health': return self.reply(200,{'ok':True,'service':'digimarketing','pid':os.getpid()})
         if self.path=='/api/download': return self.reply(200,{'available':(ROOT/'downloads/DigiMarketing.apk').is_file()})
         if self.path=='/downloads/DigiMarketing.apk':
             p=ROOT/'downloads/DigiMarketing.apk'

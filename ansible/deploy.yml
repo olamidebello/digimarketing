@@ -57,6 +57,21 @@
       args:
         chdir: '{{ digi_root }}/repo'
       changed_when: false
+    - name: Inspect existing services
+      ansible.builtin.service_facts:
+    - name: Stop only DigiMarketing before checking its port
+      ansible.builtin.systemd:
+        name: digimarketing
+        state: stopped
+      when: "'digimarketing.service' in ansible_facts.services"
+    - name: Select free DigiMarketing port without touching other apps
+      ansible.builtin.command:
+        argv: [python3, '{{ digi_root }}/repo/scripts/select_port.py', '{{ digi_port | string }}']
+      register: selected_digi_port
+      changed_when: false
+    - name: Record effective listener port
+      ansible.builtin.set_fact:
+        digi_listen_port: '{{ selected_digi_port.stdout | int }}'
     - name: Create protected state directory
       ansible.builtin.file:
         path: /var/lib/digimarketing
@@ -77,7 +92,7 @@
         owner: root
         group: root
         mode: '0600'
-        content: "{{ {'digi_domain': digi_domain, 'digi_root': digi_root, 'digi_port': digi_port, 'digi_repo': digi_repo, 'digi_ref': digi_ref, 'digi_ai_env': digi_ai_env, 'digi_tls_email': digi_tls_email} | to_nice_yaml }}"
+        content: "{{ {'digi_domain': digi_domain, 'digi_root': digi_root, 'digi_port': digi_listen_port, 'digi_repo': digi_repo, 'digi_ref': digi_ref, 'digi_ai_env': digi_ai_env, 'digi_tls_email': digi_tls_email} | to_nice_yaml }}"
     - name: Preserve account configuration on upgrades
       ansible.builtin.copy:
         dest: /etc/digimarketing/accounts.json
@@ -114,7 +129,7 @@
           {% endif %}
           Environment=DIGI_DB=/var/lib/digimarketing/app.db
           Environment=DIGI_WORKER=0
-          Environment=PORT={{ digi_port }}
+          Environment=PORT={{ digi_listen_port }}
           Environment=DIGI_ACCOUNTS_FILE=/etc/digimarketing/accounts.json
           ExecStart=/usr/bin/python3 {{ digi_root }}/repo/app.py
           Restart=on-failure
@@ -142,26 +157,55 @@
         daemon_reload: true
     - name: Verify application readiness
       ansible.builtin.uri:
-        url: http://127.0.0.1:{{ digi_port }}/health
+        url: http://127.0.0.1:{{ digi_listen_port }}/health
       register: ready
       retries: 10
       delay: 2
-      until: ready.status == 200
-    - name: Install dedicated domain gateway
+      until: ready.status == 200 and ready.json.service | default('') == 'digimarketing'
+    - name: Read service process identity
+      ansible.builtin.command: systemctl show digimarketing.service --property=MainPID --value
+      register: digi_main_pid
+      changed_when: false
+    - name: Require response from the actual DigiMarketing process
+      ansible.builtin.assert:
+        that:
+          - ready.json.pid | int == digi_main_pid.stdout | int
+          - digi_main_pid.stdout | int > 0
+    - name: Inspect existing domain configuration
+      ansible.builtin.command:
+        argv: [python3, '{{ digi_root }}/repo/scripts/check_nginx_domain.py', '{{ digi_domain }}']
+      changed_when: false
+    - name: Check existing domain certificate
+      ansible.builtin.stat:
+        path: /etc/letsencrypt/live/{{ digi_domain }}/fullchain.pem
+      register: digi_existing_cert
+    - name: Repair dedicated domain gateway and preserve a backup
       ansible.builtin.copy:
         dest: /etc/nginx/sites-available/{{ digi_domain }}
-        force: false
+        backup: true
         mode: '0644'
         content: |
+          # Managed by DigiMarketing. Other domain configurations are preserved.
           server {
             listen 80;
             server_name {{ digi_domain }};
+          {% if digi_existing_cert.stat.exists %}
+            return 301 https://$host$request_uri;
+          }
+          server {
+            listen 443 ssl;
+            server_name {{ digi_domain }};
+            ssl_certificate /etc/letsencrypt/live/{{ digi_domain }}/fullchain.pem;
+            ssl_certificate_key /etc/letsencrypt/live/{{ digi_domain }}/privkey.pem;
+          {% endif %}
             client_max_body_size 64k;
             location / {
-              proxy_pass http://127.0.0.1:{{ digi_port }};
+              proxy_pass http://127.0.0.1:{{ digi_listen_port }};
               proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
               proxy_set_header X-Forwarded-Proto $scheme;
               proxy_read_timeout 60s;
+              add_header Cache-Control "no-store" always;
             }
           }
     - name: Enable domain
@@ -188,6 +232,15 @@
       ansible.builtin.uri:
         url: https://{{ digi_domain }}/health
         validate_certs: true
+      register: public_digi_health
+      failed_when: public_digi_health.status != 200 or public_digi_health.json.service | default('') != 'digimarketing'
+    - name: Verify public homepage branding
+      ansible.builtin.uri:
+        url: https://{{ digi_domain }}/
+        return_content: true
+        validate_certs: true
+      register: public_digi_home
+      failed_when: public_digi_home.status != 200 or 'DigiMarketing' not in public_digi_home.content or 'Africa Credit' in public_digi_home.content
     - name: Install scheduled Ansible batch service
       ansible.builtin.copy:
         dest: /etc/systemd/system/digimarketing-batch.service
@@ -233,4 +286,4 @@
         daemon_reload: true
     - name: Report deployment
       ansible.builtin.debug:
-        msg: "DigiMarketing HTTPS verified. AI environment selected={{ digi_ai_env != '' }}. Configure OPENAI_MODEL in the existing environment if absent. APK installed={{ digi_apk_source != '' }}. Other social integrations remain manual export."
+        msg: "DigiMarketing app identity, homepage and HTTPS verified on port {{ digi_listen_port }}. AI environment selected={{ digi_ai_env != '' }}. Configure OPENAI_MODEL in the existing environment if absent. APK installed={{ digi_apk_source != '' }}. Other social integrations remain manual export."
