@@ -14,13 +14,18 @@
   tasks:
     - name: Provision and verify saved Facebook connection without exposing credentials
       ansible.builtin.command:
-        argv: "{{ ['python3', digi_root + '/repo/scripts/provision-facebook.py', '--owner', digi_facebook_owner, '--page', digi_facebook_page_id | string, '--version', digi_facebook_version] + (['--token-file', digi_facebook_token_file] if digi_facebook_token_file | length > 0 else []) + (['--enable'] if digi_facebook_enable | bool else []) }}"
+        argv: "{{ ['python3', playbook_dir + '/../scripts/provision-facebook.py', '--owner', digi_facebook_owner, '--page', digi_facebook_page_id | string, '--version', digi_facebook_version] + (['--token-file', digi_facebook_token_file] if digi_facebook_token_file | length > 0 else []) + (['--enable'] if digi_facebook_enable | bool else []) }}"
       environment:
         DIGI_DB: /var/lib/digimarketing/app.db
         DIGI_MASTER_KEY_FILE: /etc/digimarketing/master.key
       register: facebook_provision
       no_log: true
-      changed_when: (facebook_provision.stdout | from_json).changed | bool
+      failed_when: false
+      changed_when: facebook_provision.rc == 0 and (facebook_provision.stdout | from_json).changed | bool
+    - name: Report safe provisioning failure
+      ansible.builtin.fail:
+        msg: "Facebook provisioning could not complete. Source now runs directly from the pulled checkout. Check that the super admin, /var/lib/digimarketing/app.db, /etc/digimarketing/master.key and an unexpired Page token exist. No configuration changes were committed. Credentials remain hidden."
+      when: not ansible_check_mode and facebook_provision.rc | default(1) != 0
     - name: Report provisioning result without credentials
       when: not ansible_check_mode
       ansible.builtin.debug:
