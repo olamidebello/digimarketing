@@ -192,3 +192,17 @@ The Meta app ID is 1409571857518808. Its published status does not grant posting
 Facebook text campaigns use the versioned /PAGE_ID/feed API. Global pause, account pacing, batch limits, campaign approval and delivery receipts also apply. Failures require review instead of automatic replay, because a lost response may hide a successful post. Disabling a connection cannot recall an in-flight post. Removal deletes the local encrypted token; revoke provider access separately in Meta Business Integrations. This implementation does not include OAuth onboarding, automatic token renewal, media uploads, ads, analytics or Page post deletion. See https://developers.facebook.com/documentation/pages-api/posts.
 
 Deploy using the existing ansible/pull-and-deploy.yml playbook. Then sign in as super admin and open API & keys → Facebook Pages. No database migration or secret in Ansible is required.
+
+### Automatic Facebook provisioning with Ansible
+
+After pulling/deploying current source, run:
+
+```bash
+ansible-playbook -i localhost, -c local /opt/digimarketing/repo/ansible/provision-facebook.yml
+```
+
+Defaults target super admin dobcalldemo@gmail.com, Graph Page ID 1448088625044064 and v26.0. The playbook reuses the encrypted token already saved in the GUI, verifies its Page identity, and leaves publishing disabled. It requires the existing database, super admin and encryption key. It does not create an admin, bypass password checks in the GUI, obtain Meta authorization or send a post. Root provisioning is an operator action and writes audit records.
+
+To explicitly enable approved scheduled publishing, add `-e digi_facebook_enable=true`. Use a token with pages_manage_posts and pages_read_engagement; the current read-only token must be replaced for posting. Identity verification alone does not validate write scope. No automatic replay of failed/uncertain posts occurs.
+
+To install/rotate a token without the GUI, put only the Page token into a root-owned regular file with mode 0600 on the server, then add `-e digi_facebook_token_file=/etc/digimarketing/facebook-page.token`. Never put the token itself into command arguments, inventory, GitHub or chat. The script rejects symlinks and accessible token files. The source token file stays under operator control; provisioned ciphertext is managed by the GUI. Subsequent runs can omit the file to reuse ciphertext. Keep the requested enable flag consistent on recurring runs: the default false disables an already enabled connection. Failed verification rolls back the transaction. Successful unchanged runs do not rewrite configuration or append audit records.
