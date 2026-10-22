@@ -1,0 +1,3 @@
+---
+# Run through ansible-pull to fetch the latest source before loading deployment tasks.
+- import_playbook: deploy.yml

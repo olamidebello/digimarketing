@@ -104,3 +104,23 @@ These are controlled batches to authorized accounts. Automated account creation,
 Public pages `/terms`, `/privacy` and `/copyright` are linked from the website and Android web workspace. Version `2026-10-22.1` covers campaign approval, batch scheduling, provider limits, AI review, advertising responsibilities, rights in content, cookies, provider sharing, acceptance records and automation logs. Registration requires explicit acceptance of the current Terms and acknowledgement of the Privacy Notice. SQLite stores version IDs and acceptance time; no extra IP address is collected for this record. Existing users are not retroactively marked as accepting new terms. Account deletion removes the active acceptance record along with that user's attempt and AI-usage data.
 
 Reference material consulted: [FTC advertising guidance](https://www.ftc.gov/business-guidance/advertising-marketing), [FTC personal-information protection guidance](https://www.ftc.gov/business-guidance/resources/protecting-personal-information-guide-business-0), and [U.S. Copyright Office permission FAQ](https://www.copyright.gov/help/faq/faq-fairuse.html). These pages describe implemented behavior; they do not certify regulatory compliance. Configure and verify the operator's support contact and backup retention before public launch.
+
+
+## Pull the latest GitHub source and deploy in one command
+
+On the hosting server as root, install Ansible if needed, then use:
+
+```sh
+apt-get update && apt-get install -y git ansible-core
+ansible-pull -U https://github.com/olamidebello/digimarketing.git \
+ -C main -d /opt/digimarketing-bootstrap -i localhost, -c local \
+ ansible/pull-and-deploy.yml
+```
+
+This fetches GitHub main before loading the deployment playbook. Deployment then pulls the application checkout, tests it, backs up the database, installs/restarts the service, enables campaign automation, installs the bundled APK, configures the domain gateway and verifies HTTPS.
+
+On first deployment, append `-e digi_ai_env=/absolute/path/to/the/existing/server.env` to reference your existing AI settings. Subsequent deployments restore the selected path, domain, root, port and TLS email from `/etc/digimarketing/deployment.yml`; explicit `-e` overrides take precedence. This file contains deployment choices, never API key values. Without a selected existing AI file, the application deploys with AI drafting disabled.
+
+After checkout, `bash /opt/digimarketing-bootstrap/scripts/deploy-server.sh` performs the same pull and deployment with a lock against concurrent invocations of that script. Extra Ansible arguments can be appended, such as `-e digi_publish_store=true` to install the app listing in the existing African Apps Store database. Other invocation methods should not be run concurrently. Existing local source edits are preserved: a conflicting checkout stops rather than discarding them.
+
+DNS for `digimarketing.olamidepanel.com` must resolve to this server before certificate issuance. A failed certificate request stops deployment and reports the error; HTTP readiness alone is not a verified HTTPS deployment. Creating the first administrator remains the explicit server-terminal command documented above.

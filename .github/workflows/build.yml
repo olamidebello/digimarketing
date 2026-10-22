@@ -17,6 +17,8 @@ jobs:
       - run: node --check static/app.js
       - run: pip install ansible-core
       - run: |
+          bash -n scripts/deploy-server.sh
+          ansible-playbook -i localhost, -c local ansible/pull-and-deploy.yml --syntax-check
           ansible-playbook -i localhost, -c local ansible/deploy.yml --syntax-check
           ansible-playbook -i localhost, -c local ansible/run-campaign-batch.yml --syntax-check
   android:

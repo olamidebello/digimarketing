@@ -12,6 +12,14 @@
     digi_tls_email: dobcalldemo@gmail.com
     digi_apk_source: '{{ digi_root }}/repo/downloads/DigiMarketing.apk'
   tasks:
+    - name: Check saved deployment settings
+      ansible.builtin.stat:
+        path: /etc/digimarketing/deployment.yml
+      register: saved_digi_settings
+    - name: Restore deployment settings without exposing credentials
+      ansible.builtin.include_vars:
+        file: /etc/digimarketing/deployment.yml
+      when: saved_digi_settings.stat.exists
     - name: Validate deployment settings
       ansible.builtin.assert:
         that:
@@ -63,6 +71,13 @@
         owner: root
         group: digimarketing
         mode: '0750'
+    - name: Save deployment choices for future pulls
+      ansible.builtin.copy:
+        dest: /etc/digimarketing/deployment.yml
+        owner: root
+        group: root
+        mode: '0600'
+        content: "{{ {'digi_domain': digi_domain, 'digi_root': digi_root, 'digi_port': digi_port, 'digi_repo': digi_repo, 'digi_ref': digi_ref, 'digi_ai_env': digi_ai_env, 'digi_tls_email': digi_tls_email} | to_nice_yaml }}"
     - name: Preserve account configuration on upgrades
       ansible.builtin.copy:
         dest: /etc/digimarketing/accounts.json
