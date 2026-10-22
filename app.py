@@ -7,12 +7,13 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from http.cookies import SimpleCookie
 import integrations
+import commerce
 
 ROOT = Path(__file__).parent
 DB = os.getenv('DIGI_DB', str(ROOT / 'data/app.db'))
 ATTEMPTS = {}
 LIMIT_LOCK = threading.Lock()
-LEGAL_VERSION = '2026-10-22.2'
+LEGAL_VERSION = '2026-10-22.3'
 CHANNELS = ['Facebook','Instagram','X','LinkedIn','TikTok','YouTube','Pinterest','Threads','Mastodon']
 
 def db():
@@ -38,6 +39,7 @@ def init():
         CREATE TABLE IF NOT EXISTS deliveries(campaign_id INTEGER,channel TEXT,status TEXT,detail TEXT,updated REAL,UNIQUE(campaign_id,channel));
         ''')
         c.execute('INSERT OR IGNORE INTO user_sequence(id) SELECT id FROM users')
+        commerce.init(c)
     os.chmod(DB,0o600)
 
 def next_user_id(c):
@@ -179,6 +181,7 @@ class Handler(BaseHTTPRequestHandler):
         if not token: return None
         with db() as c: return c.execute('SELECT users.*,sessions.csrf FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?',(hashlib.sha256(token.value.encode()).hexdigest(),time.time())).fetchone()
     def do_GET(self):
+        if self.path.startswith('/checkout/return?'):self.path='/'
         if self.path=='/api/legal': return self.reply(200,{'version':LEGAL_VERSION,'terms':'/terms','privacy':'/privacy','copyright':'/copyright'})
         if self.path=='/health': return self.reply(200,{'ok':True,'service':'digimarketing','pid':os.getpid()})
         if self.path=='/api/download': return self.reply(200,{'available':(ROOT/'downloads/DigiMarketing.apk').is_file()})
@@ -195,8 +198,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type',{'html':'text/html','js':'text/javascript','css':'text/css'}[p.suffix[1:]])
             self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'")
             self.end_headers(); return self.wfile.write(data)
+        if self.path=='/api/marketplace':
+            with db() as c:
+                products=[dict(r) for r in c.execute('SELECT id,title,category,price,kind,description,delivery FROM products WHERE active=1 ORDER BY price')]
+                gateways=commerce.public_gateways(c)
+            return self.reply(200,{'products':products,'gateways':gateways,'currency':'USD'})
         u=self.session()
         if not u: return self.reply(401,{'error':'Please sign in'})
+        if self.path=='/api/orders':
+            with db() as c:return self.reply(200,{'orders':commerce.public_orders(c,u['id'])})
+        if self.path=='/api/admin/marketplace':
+            if u['role']!='admin':return self.reply(403,{'error':'Administrator required'})
+            with db() as c:return self.reply(200,{'products':[dict(r) for r in c.execute('SELECT * FROM products ORDER BY id')],'orders':commerce.public_orders(c),'gateways':commerce.public_gateways(c)})
         if self.path=='/api/admin/integrations':
             if u['role']!='admin': return self.reply(403,{'error':'Administrator required'})
             with db() as c:
@@ -217,6 +230,14 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError,KeyError,TypeError,json.JSONDecodeError): self.reply(400,{'error':'Invalid request or required field missing'})
         except Exception: self.reply(500,{'error':'Operation failed. Check server configuration.'})
     def post(self):
+        if self.path=='/api/payments/webhooks/stripe':
+            length=int(self.headers.get('Content-Length','0'))
+            if not 0<length<=262144:return self.reply(413,{'error':'Invalid webhook size'})
+            raw=self.rfile.read(length)
+            try:
+                with db() as c:commerce.stripe_webhook(c,DB,raw,self.headers.get('Stripe-Signature',''))
+                return self.reply(200,{'received':True})
+            except ValueError:return self.reply(400,{'error':'Webhook verification failed'})
         length=int(self.headers.get('Content-Length','0'))
         if length>32000: return self.reply(413,{'error':'Request too large'})
         if self.headers.get('Content-Type')!='application/json': return self.reply(415,{'error':'JSON required'})
@@ -243,6 +264,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200,{'ok':True},'session='+token+'; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400'+('' if os.getenv('DIGI_DEV')=='1' else '; Secure'))
         if not u: return self.reply(401,{'error':'Please sign in'})
         if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),u['csrf']): return self.reply(403,{'error':'Session verification failed'})
+        if self.path=='/api/checkout':
+            if d.get('accepted_purchase_terms') is not True: return self.reply(400,{'error':'Review the product and purchase terms before checkout.'})
+            try:
+                with db() as c:result=commerce.start_checkout(c,DB,u['id'],u['email'],d['product_id'],d['provider'],d.get('brief',''))
+                return self.reply(201,result)
+            except ValueError as e:return self.reply(400,{'error':str(e)})
+        if self.path=='/api/orders/verify':
+            try:
+                with db() as c:result=commerce.verify(c,DB,str(d['order_id']),u['id'],capture=True)
+                return self.reply(200,result)
+            except ValueError as e:return self.reply(400,{'error':str(e)})
+        if self.path=='/api/orders/download':
+            with db() as c:order=c.execute('SELECT * FROM orders WHERE id=? AND user_id=?',(str(d['order_id']),u['id'])).fetchone()
+            if not order or order['status']!='paid' or order['kind']!='digital':return self.reply(403,{'error':'A confirmed paid digital-product order is required.'})
+            return self.reply(200,{'title':order['title'],'content':order['digital_content']})
         if self.path=='/api/logout':
             with db() as c: c.execute('DELETE FROM sessions WHERE user_id=? AND csrf=?',(u['id'],u['csrf']))
             return self.reply(200,{'ok':True},'session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict')
@@ -254,10 +290,11 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute('DELETE FROM deliveries WHERE campaign_id IN (SELECT id FROM campaigns WHERE user_id=?)',(u['id'],))
                 c.execute('DELETE FROM claims WHERE campaign_id IN (SELECT id FROM campaigns WHERE user_id=?)',(u['id'],))
                 c.execute('DELETE FROM integrations WHERE name=?',('mastodon:'+str(u['id']),))
+                c.execute("UPDATE orders SET user_id=NULL,brief='' WHERE user_id=?",(u['id'],))
                 for table in ['attempts','ai_usage','legal_acceptances']:c.execute('DELETE FROM '+table+' WHERE user_id=?',(u['id'],))
                 c.execute('DELETE FROM campaigns WHERE user_id=?',(u['id'],)); c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],)); c.execute('DELETE FROM users WHERE id=?',(u['id'],))
             return self.reply(200,{'ok':True},'session=; Max-Age=0; Path=/')
-        if self.path in ['/api/admin/integrations/ai','/api/admin/integrations/social','/api/admin/integrations/test']:
+        if self.path in ['/api/admin/integrations/ai','/api/admin/integrations/social','/api/admin/integrations/test','/api/admin/marketplace/gateway','/api/admin/marketplace/product','/api/admin/marketplace/fulfillment']:
             if u['role']!='admin':return self.reply(403,{'error':'Administrator required'})
             with db() as c:
                 failures=c.execute("SELECT count(*) FROM integration_audit WHERE actor=? AND action='reauth.failed' AND created>?",(u['id'],time.time()-300)).fetchone()[0]
@@ -269,7 +306,14 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with db() as c:
                     c.execute('BEGIN IMMEDIATE')
-                    if self.path.endswith('/ai'):integrations.save_ai(c,DB,d,u['id'])
+                    if self.path.endswith('/gateway'):commerce.save_gateway(c,DB,d,u['id'])
+                    elif self.path.endswith('/product'):commerce.save_product(c,d,u['id'])
+                    elif self.path.endswith('/fulfillment'):
+                        if d['fulfillment'] not in ['queued','in_progress','fulfilled','refund_review']:raise ValueError('Invalid fulfillment status')
+                        row=c.execute("SELECT * FROM orders WHERE id=? AND status='paid' AND kind='service'",(str(d['order_id']),)).fetchone()
+                        if not row:raise ValueError('A paid service order is required')
+                        c.execute('UPDATE orders SET fulfillment=? WHERE id=?',(d['fulfillment'],row['id']));integrations.audit(c,u['id'],'order.fulfillment.'+d['fulfillment'])
+                    elif self.path.endswith('/ai'):integrations.save_ai(c,DB,d,u['id'])
                     elif self.path.endswith('/social'):integrations.save_social(c,DB,d,u['id'])
                     else:
                         recent=c.execute("SELECT 1 FROM integration_audit WHERE actor=? AND action='ai.test' AND created>?",(u['id'],time.time()-60)).fetchone()
