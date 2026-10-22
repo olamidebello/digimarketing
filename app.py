@@ -28,12 +28,17 @@ def init():
         CREATE TABLE IF NOT EXISTS batch_runs(id INTEGER PRIMARY KEY,started REAL,finished REAL,processed INTEGER,status TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
         CREATE TABLE IF NOT EXISTS ai_usage(user_id INTEGER,created REAL);
+        CREATE TABLE IF NOT EXISTS user_sequence(id INTEGER PRIMARY KEY AUTOINCREMENT);
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE,password TEXT,role TEXT);
         CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id INTEGER,csrf TEXT,expires REAL);
         CREATE TABLE IF NOT EXISTS campaigns(id INTEGER PRIMARY KEY,user_id INTEGER,title TEXT,brief TEXT,content TEXT,channels TEXT,due REAL,status TEXT DEFAULT 'draft',created REAL);
         CREATE TABLE IF NOT EXISTS deliveries(campaign_id INTEGER,channel TEXT,status TEXT,detail TEXT,updated REAL,UNIQUE(campaign_id,channel));
         ''')
+        c.execute('INSERT OR IGNORE INTO user_sequence(id) SELECT id FROM users')
     os.chmod(DB,0o600)
+
+def next_user_id(c):
+    return c.execute('INSERT INTO user_sequence DEFAULT VALUES').lastrowid
 
 def password(p,salt=None):
     salt=salt or secrets.token_hex(16)
@@ -215,7 +220,7 @@ class Handler(BaseHTTPRequestHandler):
             with db() as c:
                 if self.path.endswith('register'):
                     if d.get('accepted_terms') is not True or d.get('privacy_acknowledged') is not True or d.get('legal_version')!=LEGAL_VERSION:return self.reply(400,{'error':'Accept the current Terms and acknowledge the Privacy Notice to create an account. Reload this page if it is out of date.'})
-                    try: c.execute('INSERT INTO users(email,password,role) VALUES(?,?,?)',(email,password(p),'user'))
+                    try: c.execute('INSERT INTO users(id,email,password,role) VALUES(?,?,?,?)',(next_user_id(c),email,password(p),'user'))
                     except sqlite3.IntegrityError: return self.reply(409,{'error':'Account already exists'})
                 user=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone()
                 if not user or not hmac.compare_digest(password(p,user['password'].split(':')[0]),user['password']): return self.reply(401,{'error':'Invalid credentials'})

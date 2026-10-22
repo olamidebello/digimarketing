@@ -6,6 +6,6 @@ secret=getpass.getpass('New admin password (12+ characters): ')
 if len(secret)<12: raise SystemExit('Use at least 12 characters')
 app.init()
 with app.db() as c:
-    try: c.execute('INSERT INTO users(email,password,role) VALUES(?,?,?)',(args.email.lower().strip(),app.password(secret),'admin'))
+    try: c.execute('INSERT INTO users(id,email,password,role) VALUES(?,?,?,?)',(app.next_user_id(c),args.email.lower().strip(),app.password(secret),'admin'))
     except sqlite3.IntegrityError: raise SystemExit('Account exists; refusing to overwrite it. Review account ownership before promotion.')
 print('Administrator created.')

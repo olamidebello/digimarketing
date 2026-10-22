@@ -26,3 +26,9 @@ class LegalTests(unittest.TestCase):
   self.assertEqual(self.req('/api/account/delete',{})[0],200)
   with app.db() as c:
    for table in ['legal_acceptances','attempts']:self.assertEqual(c.execute('SELECT count(*) FROM '+table).fetchone()[0],0)
+
+ def test_deleted_identity_is_never_reused_for_social_credentials(self):
+  self.register('first@example.com');old=self.req('/api/state')[1]['user']['id']
+  self.assertEqual(self.req('/api/account/delete',{})[0],200)
+  self.register('second@example.com');new=self.req('/api/state')[1]['user']['id']
+  self.assertGreater(new,old)
