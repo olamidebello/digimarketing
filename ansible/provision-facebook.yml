@@ -24,7 +24,7 @@
       changed_when: facebook_provision.rc == 0 and (facebook_provision.stdout | from_json).changed | bool
     - name: Report safe provisioning failure
       ansible.builtin.fail:
-        msg: "Facebook provisioning could not complete. Source now runs directly from the pulled checkout. Check that the super admin, /var/lib/digimarketing/app.db, /etc/digimarketing/master.key and an unexpired Page token exist. No configuration changes were committed. Credentials remain hidden."
+        msg: "Facebook provisioning failed: {{ (facebook_provision.stdout | default('{}', true) | from_json).error_code | default('LOCAL_CONFIGURATION_ERROR') }}. No changes committed. TOKEN_DECRYPT_FAILED means the saved token and encryption key do not match; META_TOKEN_INVALID_OR_EXPIRED requires a replacement Page token; PAGE_ID_MISMATCH requires the token's correct Graph Page ID; TOKEN_MISSING requires saving a token first. Credentials remain hidden."
       when: not ansible_check_mode and facebook_provision.rc | default(1) != 0
     - name: Report provisioning result without credentials
       when: not ansible_check_mode

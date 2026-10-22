@@ -28,3 +28,10 @@ class ProvisionTests(unittest.TestCase):
  def test_protected_file(self):
   p=Path(self.temp.name)/'token';p.write_text('test-page-token-secret');p.chmod(0o644)
   with self.assertRaises(ValueError):provision.read_token(str(p))
+ def test_meta_error_is_sanitized(self):
+  import io,urllib.error,facebook
+  secret='DO_NOT_EXPOSE_TOKEN'
+  error=urllib.error.HTTPError('https://graph.facebook.com',400,'bad',{},io.BytesIO(json.dumps({'error':{'code':190,'message':secret}}).encode()))
+  with patch('urllib.request.urlopen',side_effect=error):
+   with self.assertRaises(ValueError) as caught:facebook.request({'version':'v26.0'},secret,'me?fields=id,name')
+  self.assertIn('META_TOKEN_INVALID_OR_EXPIRED',str(caught.exception));self.assertNotIn(secret,str(caught.exception))

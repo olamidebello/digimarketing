@@ -1,6 +1,7 @@
 """Operator-managed Facebook Page connections. Tokens never leave the server API."""
 import json,re,time,urllib.request,urllib.parse
 import integrations
+from urllib.error import HTTPError,URLError
 
 def request(config,token,path,fields=None):
     url='https://graph.facebook.com/'+config['version']+'/'+path
@@ -8,7 +9,14 @@ def request(config,token,path,fields=None):
     req=urllib.request.Request(url,data=body,headers={'Authorization':'Bearer '+token})
     try:
         with urllib.request.urlopen(req,timeout=25) as response:return json.load(response)
-    except Exception:raise ValueError('Facebook request failed. Check Page token, permissions, expiry and provider status.') from None
+    except HTTPError as e:
+        code=None
+        try:code=json.loads(e.read(65536)).get('error',{}).get('code')
+        except Exception:pass
+        messages={190:'META_TOKEN_INVALID_OR_EXPIRED: Replace the Page token in API & keys.',200:'META_PERMISSION_DENIED: Authorize the Page and required permissions.',10:'META_PERMISSION_DENIED: Review Meta app permission access.',100:'META_INVALID_PAGE_OR_REQUEST: Check the Graph Page ID and API version.'}
+        raise ValueError(messages.get(code,'META_HTTP_ERROR: Meta rejected the request; check token and Page access.')) from None
+    except (URLError,TimeoutError,OSError):raise ValueError('META_NETWORK_ERROR: Server could not reach Meta over HTTPS.') from None
+    except Exception:raise ValueError('META_RESPONSE_INVALID: Meta returned an unreadable response.') from None
 
 def save(c,db,data,actor):
     uid=int(data['user_id'])
