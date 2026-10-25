@@ -207,7 +207,7 @@ class Handler(BaseHTTPRequestHandler):
             p=ROOT/'downloads/DigiMarketing.apk'
             if not p.is_file(): return self.reply(404,{'error':'Android build not published yet'})
             data=p.read_bytes(); self.send_response(200); self.send_header('Content-Type','application/vnd.android.package-archive'); self.send_header('Content-Disposition','attachment; filename=DigiMarketing.apk'); self.send_header('Content-Length',str(len(data))); self.end_headers(); return self.wfile.write(data)
-        if self.path in ['/terms','/privacy','/copyright']:
+        if self.path in ['/terms','/privacy','/copyright','/install']:
             data=(ROOT/'static'/(self.path[1:]+'.html')).read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers(); return self.wfile.write(data)
         if self.path in ['/brand.png','/manifest.json']:
             data=(ROOT/'static'/self.path[1:]).read_bytes(); self.send_response(200); self.send_header('Content-Type','image/png' if self.path.endswith('png') else 'application/manifest+json'); self.end_headers(); return self.wfile.write(data)

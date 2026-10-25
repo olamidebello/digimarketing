@@ -1,0 +1,4 @@
+---
+- import_playbook: deploy.yml
+  vars:
+    digi_publish_store: true

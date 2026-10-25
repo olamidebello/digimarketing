@@ -212,3 +212,15 @@ To install/rotate a token without the GUI, put only the Page token into a root-o
 Super admin → API & keys includes Manual user credit, balances, the latest 100 ledger entries, and shared Facebook Page controls. Grant positive integer USD cents with a reason and password confirmation. Grants and credit purchases use unique request IDs to prevent duplicate submissions; balances cannot be overdrawn. Store credit pays for marketplace items with the existing delivery/fulfillment rules. Credit is not cash, has no withdrawal or transfer feature, and is not a Stripe/PayPal refund. Ledger entries are retained for accounting using non-reused numeric user IDs after account deletion. No credits are automatically granted by deployment.
 
 Assign an enabled verified source Page connection to another registered user. Each recipient has at most one shared connection; their enabled personal Page takes priority. Recipients can schedule their own approved campaigns onto the shared Page, so grant access only with the Page owner's authorization. They cannot retrieve the source token or delegate access. Shared grants are checked on every send, share the source owner's rate limits, and stop working when revoked or the source connection is disabled/removed. In-flight posts can finish. Deleting either account removes the grant. The source owner may rotate tokens without copying new secrets to recipients. All admin changes require CSRF, admin role, password confirmation and audit logging.
+
+## Android installation and store publication
+
+The signed development APK is served at `/downloads/DigiMarketing.apk`; `/install` is a public installation guide linked from the landing page. Android 8+ is required. This website client shows current server features without rebuilding the binary. The verified 1.0.0-dev APK SHA-256 is 906dcfcb18ea79ac5b0a3923ddd4f1b23afd05dc10c97f2fa3c671f0f0e250c4. Its original development signing key has not been recovered; retain the existing APK to preserve install compatibility. Native source and GitHub Android build workflow remain in the repository. A production upgrade requires a durable release signing key and migration planning.
+
+Deploy the install guide and update the existing African Apps Store database on the same server:
+
+```bash
+ansible-pull -U https://github.com/olamidebello/digimarketing.git -C main -d /opt/digimarketing-bootstrap -i localhost, -c local ansible/publish-mobile.yml -e '{"digi_ai_env":""}'
+```
+
+The store database defaults to `/var/lib/africanappsstore/store.sqlite3`; override digi_store_db if needed. The publisher backs it up and changes only DigiMarketing's metadata. It requires the existing store database; it does not install or overwrite the store. A successful live `/api/hosted-apps` verification is required by the playbook. Separate-server deployments must run the listing installer on the store host with a verified local APK.

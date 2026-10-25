@@ -34,7 +34,7 @@
         "name": "DigiMarketing",
         "version": "1.0.0-dev",
         "channel": "development",
-        "description": "AI-assisted campaign planning, drafting, approval and scheduling. Direct publishing for configured Mastodon accounts; copy export for other channels.",
+        "description": "AI-assisted campaign planning, drafting, approval and scheduling. Direct publishing for authorized Facebook Pages and Mastodon accounts; marketplace and account credit; copy export for other channels.",
         "website": "https://digimarketing.olamidepanel.com/",
         "download_url": "https://digimarketing.olamidepanel.com/downloads/DigiMarketing.apk",
         "icon_url": "https://digimarketing.olamidepanel.com/brand.png",
